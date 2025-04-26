@@ -1,0 +1,49 @@
+[package]
+name = "rust-x206LCD"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "ax206lcd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ax206lcd"
+path = "src/main.rs"
+
+
+[dependencies]
+# USB communication
+rusb = "0.9"
+# Image processing
+image = "0.24"
+imageproc = "0.23"
+# System information
+sysinfo = "0.29"
+# Configuration
+config = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+# Logging
+log = "0.4"
+env_logger = "0.10"
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+# Utilities
+humansize = "2.1"
+chrono = "0.4"
+# Command execution
+subprocess = "0.2"
+# File operations
+walkdir = "2.3"
+# Regular expressions
+regex = "1.9"
+rusttype = "0.9"
+tokio = { version = "1.36", features = ["full"] }
+systemstat = "0.2.4"
+serde_json = "1.0.140"
+ordermap = "0.5.7"
+
+[dev-dependencies]
+# Testing utilities
+tempfile = "3.8"
