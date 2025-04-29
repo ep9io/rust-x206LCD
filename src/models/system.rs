@@ -1,4 +1,4 @@
-use ordermap::OrderMap;
+use indexmap::IndexMap;
 
 #[derive(Debug, Clone)]
 pub struct SystemMetrics {
@@ -62,13 +62,13 @@ pub struct SystemComponent {
 
 #[derive(Debug, Clone)]
 pub struct SensorInfo {
-    pub readings: OrderMap<String, SystemComponent>,
+    pub readings: IndexMap<String, SystemComponent>,
     pub display: String,
 }
 impl Default for SensorInfo {
     fn default() -> Self {
         Self {
-            readings: OrderMap::new(),
+            readings: IndexMap::new(),
             display: String::new(),
         }
     }

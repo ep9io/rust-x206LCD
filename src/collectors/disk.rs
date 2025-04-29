@@ -1,6 +1,5 @@
 use log::{debug, error};
 use std::time::{Duration, Instant};
-use sysinfo::{DiskExt, SystemExt};
 use systemstat::{ByteSize, Platform, System};
 use tokio::time;
 
@@ -64,12 +63,12 @@ pub async fn collect_io(sys: &System, allowed: &Vec<&str>) -> Vec<ByteSize> {
     result
 }
 
-pub async fn collect_block_info(sys: &sysinfo::System, allowed: &Vec<&str>) -> Vec<ByteSize> {
+pub async fn collect_block_info(disks: &sysinfo::Disks, allowed: &Vec<&str>) -> Vec<ByteSize> {
     let start = Instant::now();
     let mut disk_total = 0;
     let mut disk_used = 0;
 
-    for disk in sys.disks() {
+    for disk in disks {
         if let Some(mount_str) = disk.mount_point().to_str() {
             if !disk.is_removable() && allowed.contains(&mount_str) {
                 disk_total += disk.total_space();
@@ -79,6 +78,9 @@ pub async fn collect_block_info(sys: &sysinfo::System, allowed: &Vec<&str>) -> V
     }
 
     let result = vec![ByteSize::b(disk_used), ByteSize::b(disk_total)];
-    debug!("collect_block_info took: {} ms", start.elapsed().as_millis());
+    debug!(
+        "collect_block_info took: {} ms",
+        start.elapsed().as_millis()
+    );
     result
 }

@@ -26,7 +26,15 @@ pub fn create_image(config: &AppConfig, info: &SystemInfo) -> DynamicImage {
     let y_footer = (height as f32 * (2.0 / 3.0)) as u32;
 
     // Draw header
-    widgets::render_header(config, info, &mut image, 0, y_header, width);
+    let mut header_ctx = widgets::RenderContext {
+        config,
+        info,
+        image: &mut image,
+        x: 0,
+        y: y_header,
+        width,
+    };
+    widgets::render_header(&mut header_ctx);
 
     // Draw separator line below header
     drawing::horizonal_line(&mut image, 0, y_centre, width);
@@ -37,17 +45,41 @@ pub fn create_image(config: &AppConfig, info: &SystemInfo) -> DynamicImage {
     // TOP SECTION (66% of height)
     // LEFT SIDE (50% of width) - Resource bars
     let y_top_section = y_centre + 10;
-    widgets::render_resource_bars(config, info, &mut image, 0, y_top_section, x_middle);
+    let mut resource_bars_ctx = widgets::RenderContext {
+        config,
+        info,
+        image: &mut image,
+        x: 0,
+        y: y_top_section,
+        width: x_middle,
+    };
+    widgets::render_resource_bars(&mut resource_bars_ctx);
 
     // RIGHT SIDE (50% of width) - Process list
-    widgets::render_processes(config, info, &mut image, x_middle, y_top_section, x_middle);
+    let mut processes_ctx = widgets::RenderContext {
+        config,
+        info,
+        image: &mut image,
+        x: x_middle,
+        y: y_top_section,
+        width: x_middle,
+    };
+    widgets::render_processes(&mut processes_ctx);
 
     // BOTTOM SECTION (33% of height)
     drawing::horizonal_line(&mut image, 0, y_footer + 1, width);
 
     let y_bottom_section = y_footer + 6;
 
-    widgets::render_footer(config, info, &mut image, 0, y_bottom_section, width);
+    let mut footer_ctx = widgets::RenderContext {
+        config,
+        info,
+        image: &mut image,
+        x: 0,
+        y: y_bottom_section,
+        width,
+    };
+    widgets::render_footer(&mut footer_ctx);
 
     // Convert to RGB for saving as PNG
     let dynamic_image = DynamicImage::ImageRgba8(image);

@@ -1,4 +1,4 @@
-use ordermap::OrderMap;
+use indexmap::IndexMap;
 
 pub(crate) mod cpu;
 pub(crate) mod disk;
@@ -6,14 +6,14 @@ pub(crate) mod memory;
 pub(crate) mod network;
 pub(crate) mod nvidia;
 pub(crate) mod system;
-
+pub(crate) mod sensor;
 
 #[derive(Debug, Clone)]
 pub struct AllowedResources {
     pub disks: Vec<String>,
     pub networks: Vec<String>,
     pub mount_points: Vec<String>,
-    pub sensors: OrderMap<String, String>,
+    pub sensors: IndexMap<String, String>,
 }
 
 

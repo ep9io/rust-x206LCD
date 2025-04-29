@@ -1,5 +1,3 @@
-extern crate systemstat;
-
 use crate::models::{
     cpu::CpuInfo, disk::{DiskInfo, DiskIoInfo},
     memory::{MemoryInfo, SwapMemoryInfo},
@@ -9,9 +7,9 @@ use crate::models::{
     SystemInfo,
 };
 use log::debug;
-use ordermap::OrderMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
-use sysinfo::{System as SysInfo, SystemExt};
+use sysinfo::{System as SysInfo, Disks as SysInfoDisks};
 use systemstat::{Platform, System as SystemStat};
 use tokio::{self};
 
@@ -34,20 +32,14 @@ pub(crate) async fn collect_system_info(allowed_resources: AllowedResources) -> 
     let allowed_sensors = allowed_resources.sensors.clone();
 
     let sys_stat = Arc::new(SystemStat::new());
-    let sys_info = Arc::new(SysInfo::new_all());
 
-    // Create references to be moved into the async blocks
-    let sys_stat_disk_io = Arc::clone(&sys_stat);
-    let sys_stat_block = Arc::clone(&sys_info);
-    let sys_stat_net = Arc::clone(&sys_stat);
-    let sys_stat_mem = Arc::clone(&sys_stat);
-    let sys_stat_swap = Arc::clone(&sys_stat);
-    let sys_stat_load = Arc::clone(&sys_stat);
-    let sys_stat_uptime = Arc::clone(&sys_stat);
-    let sys_stat_cpu = Arc::clone(&sys_stat);
-    let sys_stat_temp = Arc::clone(&sys_stat);
-    let sys_info_freq = Arc::clone(&sys_info);
-    let sys_info_count = Arc::clone(&sys_info);
+    let mut sys_info = SysInfo::new_all();
+    sys_info.refresh_all();
+    let sys_info_arc = Arc::new(sys_info);
+
+    let sys_info_disks_arc = Arc::new(SysInfoDisks::new_with_refreshed_list());
+
+
 
     // Wait for all tasks to complete
     let (
@@ -63,26 +55,24 @@ pub(crate) async fn collect_system_info(allowed_resources: AllowedResources) -> 
         cpu_freq,
         cpu_count,
         nvidia,
-        mut sensors,
-        top_cpu_processes,
-        top_memory_processes,
+        sensors,
+        top_processes,
         syslog_lines,
     ) = tokio::join!(
-        disk::collect_io(&sys_stat_disk_io, &allowed_disks),
-        disk::collect_block_info(&sys_stat_block, &allowed_mount_points),
-        network::collect_io(&sys_stat_net, &allowed_networks),
-        memory::collect_ram(&sys_stat_mem),
-        memory::collect_swap(&sys_stat_swap),
-        system::collect_load(&sys_stat_load),
-        system::collect_uptime(&sys_stat_uptime),
-        cpu::collect_load_aggregate(&sys_stat_cpu),
-        cpu::collect_temperature(&sys_stat_temp),
-        cpu::collect_frequency(&sys_info_freq),
-        cpu::collect_count(&sys_info_count),
+        disk::collect_io(&sys_stat, &allowed_disks),
+        disk::collect_block_info(&sys_info_disks_arc, &allowed_mount_points),
+        network::collect_io(&sys_stat, &allowed_networks),
+        memory::collect_ram(&sys_stat),
+        memory::collect_swap(&sys_stat),
+        system::collect_load(&sys_stat),
+        system::collect_uptime(&sys_stat),
+        cpu::collect_load_aggregate(&sys_stat),
+        cpu::collect_temperature(&sys_stat),
+        cpu::collect_frequency(&sys_info_arc),
+        cpu::collect_count(&sys_info_arc),
         nvidia::collect(),
-        system::collect_sensors(&sys_info, &allowed_sensors),
-        system::collect_processes("cpu", 5),
-        system::collect_processes("memory", 5),
+        system::collect_sensors(&allowed_sensors),
+        system::collect_processes(5),
         system::collect_recent_syslog_lines(5, 75)
     );
 
@@ -92,7 +82,7 @@ pub(crate) async fn collect_system_info(allowed_resources: AllowedResources) -> 
     let cpu_freq = cpu_freq as f32;
 
 
-    let mut sensor_readings = OrderMap::new();
+    let mut sensor_readings = IndexMap::new();
     let mut nvidia_gpus = Vec::new();
     for (allowed_label_hint, rename_to) in allowed_sensors.iter() {
         let allowed = allowed_label_hint.to_lowercase();
@@ -104,7 +94,7 @@ pub(crate) async fn collect_system_info(allowed_resources: AllowedResources) -> 
                     temperature: matching_gpu.temperature,
                 };
                 sensor_readings.insert(rename_to.clone(), component_info);
-                
+
                 let n = NvidiaInfo {
                     name: rename_to.clone(),
                     temperature: matching_gpu.temperature,
@@ -126,7 +116,7 @@ pub(crate) async fn collect_system_info(allowed_resources: AllowedResources) -> 
     }
 
 
-    // Convert readings into output HashMap and display string
+    // Convert readings into output and display string
     let mut display_parts = Vec::new();
     for component in sensor_readings.values() {
         display_parts.push(format!("{:.0} {}", component.temperature, component.label));
@@ -136,7 +126,7 @@ pub(crate) async fn collect_system_info(allowed_resources: AllowedResources) -> 
         readings: sensor_readings,
         display: format!("°C: {}", sensor_display),
     };
-    
+
     let info = SystemInfo {
         cpu: CpuInfo {
             percent: cpu_percent,
@@ -208,8 +198,8 @@ pub(crate) async fn collect_system_info(allowed_resources: AllowedResources) -> 
                 .as_secs(),
             time_display: chrono::Local::now().format("%H:%M:%S").to_string(),
         },
-        top_cpu_processes,
-        top_memory_processes,
+        top_cpu_processes: top_processes.0,
+        top_memory_processes: top_processes.1,
         syslog_lines,
     };
 

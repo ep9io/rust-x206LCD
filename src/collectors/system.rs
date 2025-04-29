@@ -1,10 +1,14 @@
+use crate::models::sensor::Sensor;
 use crate::models::system::{ProcessInfo, SensorInfo, SystemComponent};
+use crate::utils;
+use crate::utils::file;
+use indexmap::IndexMap;
 use log::{debug, error};
-use ordermap::OrderMap;
 use regex::Regex;
+use std::fs::read_dir;
+use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
-use sysinfo::{ComponentExt, SystemExt};
 use systemstat::{Platform, System};
 use tokio::process::Command;
 
@@ -58,20 +62,44 @@ pub async fn collect_uptime(sys: &System) -> (u64, Vec<u64>, Vec<String>) {
     result
 }
 
-pub async fn collect_sensors(
-    sys: &sysinfo::System,
-    allowed: &OrderMap<String, String>,
-) -> SensorInfo {
+pub async fn collect_sensors(allowed: &IndexMap<String, String>) -> SensorInfo {
     let start = Instant::now();
-    let mut readings = OrderMap::<String, SystemComponent>::new();
+    let mut sensors: Vec<Sensor> = Vec::new();
+    if let Ok(dir) = read_dir(Path::new("/sys/class/hwmon/")) {
+        for entry in dir.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let entry = entry.path();
+            if !file_type.is_file()
+                && entry
+                    .file_name()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("")
+                    .starts_with("hwmon")
+            {
+                utils::hwmon::from_hwmon(&mut sensors, &entry);
+            }
+        }
+    }
 
-    for component in sys.components() {
-        let label = component.label().to_lowercase();
+    let mut readings = IndexMap::<String, SystemComponent>::new();
+
+    for sensor in &sensors {
         for (allowed_label_hint, rename_to) in allowed.iter() {
-            if label.contains(allowed_label_hint) {
+            let reference = format!(
+                "{} {} {} {}",
+                sensor.name, sensor.label, sensor.model, sensor.path
+            )
+            .replace("  ", " ")
+            .trim()
+            .to_lowercase()
+            .to_string();
+            debug!("sensor: {}", reference);
+            if reference.contains(allowed_label_hint) {
                 let component_info = SystemComponent {
                     label: rename_to.clone(),
-                    temperature: component.temperature(),
+                    temperature: sensor.temperature,
                 };
                 readings.insert(rename_to.clone(), component_info);
             }
@@ -85,8 +113,131 @@ pub async fn collect_sensors(
     debug!("collect_sensors took: {} ms", start.elapsed().as_millis());
     result
 }
+/*
+pub async fn collect_processes0(count: usize) -> (Vec<ProcessInfo>, Vec<ProcessInfo>) {
+    let mut sys = SysInfo::new_all();
+    sys.processes();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_memory()
+            .with_cpu()
+            .with_exe(UpdateKind::OnlyIfNotSet),
+    );
+    tokio::time::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
 
-pub async fn collect_processes(sort_by: &str, count: usize) -> Vec<ProcessInfo> {
+    let mut cpu: Vec<ProcessInfo> = Vec::new();
+
+    let total_memory = sys.total_memory();
+    let mut mems: HashMap<String,ProcessInfo> = HashMap::new();
+    for (pid, process) in sys.processes() {
+        let exec = process.exe();
+        if exec.is_none() {
+            continue;
+        }
+        let exec_str = exec.map_or_else(String::new, |p| p.display().to_string());
+        let cpu_percent = process.cpu_usage();
+        let mem_percent = process.memory() as f32 / total_memory as f32 * 100.0;
+        let name = exec_str.split('/').last().unwrap_or(process.name().to_str().unwrap_or("unknown")).to_string();
+        let p = ProcessInfo {
+            pid: pid.as_u32(),
+            name: name.clone(),
+            memory_percent: mem_percent,
+            cpu_percent,
+        };
+
+        // Shorten the list that needs sorting
+        if cpu_percent >= 0.0 {
+            cpu.push(p.clone());
+        }
+
+        // Shorten the list that needs sorting
+        if mem_percent > 0.1 {
+            mems.insert(format!("{}{}",name,mem_percent), p);
+        }
+    }
+
+    let mut memory:Vec<ProcessInfo> = mems.values().cloned().collect();
+    // Sort by memory (descending)
+    memory.sort_by(|a, b| b.memory_percent.total_cmp(&a.memory_percent));
+    memory.truncate(count);
+
+    // Sort by CPU (descending)
+    cpu.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
+    cpu.truncate(count);
+
+    (cpu, memory)
+}
+pub async fn collect_processes2(count: usize) -> (Vec<ProcessInfo>, Vec<ProcessInfo>) {
+    let mut sys = SysInfo::new_all();
+
+    tokio::time::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_memory()
+            .with_cpu()
+            .with_exe(UpdateKind::OnlyIfNotSet),
+    );
+
+    let total_memory = sys.total_memory();
+
+    let mut memory: Vec<ProcessInfo> = Vec::new();
+    let mut cpu: Vec<ProcessInfo> = Vec::new();
+
+    let mut pids: HashSet<u32> = HashSet::new();
+    for (pid, process) in sys.processes() {
+        let is_memory = process.memory() > 0;
+        let is_cpu = process.cpu_usage() > 0.0;
+        let exec = process.exe();
+        let exec_str = exec.map_or_else(String::new, |p| p.display().to_string());
+
+        if !exec_str.is_empty() && (is_memory || is_cpu) {
+            pids.insert(process.parent().unwrap_or(pid.clone()).as_u32());
+        }
+    }
+
+    pids.iter().for_each(|pid| {
+        if let Some(process) = sys.process(Pid::from(pid.clone() as usize)) {
+            let exec = process.exe();
+            let exec_str = exec.map_or_else(String::new, |p| p.display().to_string());
+            let p = ProcessInfo {
+                pid: pid.clone(),
+                name: exec_str.split('/').last().unwrap_or("unknown").to_string(),
+                memory_percent: process.memory() as f32 / total_memory as f32 * 100.0,
+                cpu_percent: process.cpu_usage(),
+            };
+
+            if process.memory() > 0 {
+                memory.push(p.clone());
+            }
+
+            if process.cpu_usage() > 0.0 {
+                cpu.push(p);
+            }
+        }
+    });
+
+    // Sort by memory (descending)
+    memory.sort_by(|a, b| b.memory_percent.total_cmp(&a.memory_percent));
+    memory.truncate(count);
+
+    // Sort by CPU (descending)
+    cpu.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
+    cpu.truncate(count);
+
+    (cpu, memory)
+}
+
+*/
+pub async fn collect_processes(count: usize) -> (Vec<ProcessInfo>, Vec<ProcessInfo>) {
+    let memory = collect_processes_cmd("memory", count).await;
+    let cpu = collect_processes_cmd("cpu", count).await;
+    (cpu, memory)
+}
+pub async fn collect_processes_cmd(sort_by: &str, count: usize) -> Vec<ProcessInfo> {
     let start = Instant::now();
     let sort_key = match sort_by {
         "memory" => "pmem",
@@ -95,7 +246,7 @@ pub async fn collect_processes(sort_by: &str, count: usize) -> Vec<ProcessInfo> 
     };
 
     let cmd_start = Instant::now();
-    let mut ps_command = Command::new("ps")
+    let ps_command = Command::new("ps")
         .args(&[
             "-eo",
             "pid,comm,%mem,%cpu",
@@ -162,10 +313,45 @@ pub async fn collect_processes(sort_by: &str, count: usize) -> Vec<ProcessInfo> 
 }
 
 pub async fn collect_recent_syslog_lines(num_lines: usize, character_length: usize) -> Vec<String> {
+    match file::simple_tail("/var/log/syslog", num_lines) {
+        Ok(lines) => {
+            let parse_start = Instant::now();
+            let result = lines
+                .into_iter()
+                .rev()
+                .map(|line| {
+                    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                    let message = if parts.len() >= 3 {
+                        parts[2].trim()
+                    } else {
+                        line.as_str()
+                    };
+
+                    if message.len() > character_length {
+                        format!("{}...", &message[..character_length])
+                    } else {
+                        message.to_string()
+                    }
+                })
+                .collect();
+            debug!(
+                "Syslog parsing took: {} ms",
+                parse_start.elapsed().as_millis()
+            );
+            result
+        }
+        Err(e) => {
+            error!("Error reading syslog: {}", e);
+            vec!["Error reading syslog".to_string()]
+        }
+    }
+}
+/*
+pub async fn collect_recent_syslog_lines_tail(num_lines: usize, character_length: usize) -> Vec<String> {
     let start = Instant::now();
 
     let cmd_start = Instant::now();
-    let mut tail_command = Command::new("tail")
+    let tail_command = Command::new("tail")
         .args(&["-n", &num_lines.to_string(), "/var/log/syslog"])
         .output()
         .await;
@@ -217,8 +403,23 @@ pub async fn collect_recent_syslog_lines(num_lines: usize, character_length: usi
     result
 }
 
+
+ */
 pub async fn get_hostname() -> String {
-    /*
+    let start = Instant::now();
+    match file::read_to_string("/etc/hostname") {
+        Ok(hostname) => {
+            debug!("get_hostname took: {} ms", start.elapsed().as_millis());
+            hostname
+        }
+        Err(e) => {
+            error!("Failed to get hostname: {}", e);
+            String::from("unknown")
+        }
+    }
+}
+/*
+pub async fn get_hostname_cmd() -> String {
     let start = Instant::now();
     match Command::new("hostname")
         .output()
@@ -240,7 +441,6 @@ pub async fn get_hostname() -> String {
             String::from("unknown")
         }
     }
-
-     */
-    String::from("unknown")
 }
+
+ */

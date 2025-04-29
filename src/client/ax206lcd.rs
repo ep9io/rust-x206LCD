@@ -1,9 +1,99 @@
-use anyhow::{Context as AnyhowContext, Result};
-use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
+use anyhow::{Result};
+use image::{DynamicImage, GenericImageView, Rgba};
 use log::{debug, error, info};
-use rusb::{Context, Device, DeviceHandle, Direction, TransferType, UsbContext};
+use rusb::{Context, DeviceHandle, Direction, UsbContext};
 use std::time::Duration;
 use thiserror::Error;
+use crate::config::AppConfig;
+
+/// # AX206LCD Protocol Documentation
+///
+/// This file is a conversion of the Python code posted on https://qiita.com/nak435/items/e0802355dad0f0865c69 to Rust.
+///
+/// ## USB Mass Storage Class - Bulk Only Transport
+///
+/// The AX206LCD device uses the USB Mass Storage Class - Bulk Only Transport protocol for communication.
+/// This protocol is documented in the USB specification: https://www.usb.org/sites/default/files/usbmassbulk_10.pdf
+///
+/// ## Endpoints
+///
+/// The device uses the following endpoints for bulk data transfer:
+/// - PC → LCD: 0x01 (OUT endpoint)
+/// - LCD → PC: 0x81 (IN endpoint)
+///
+/// ## Command Block Wrapper (CBW)
+///
+/// The CBW is a 31-byte structure used to send commands to the device:
+///
+/// | Offset | Parameter              | Content                                |
+/// |--------|------------------------|----------------------------------------|
+/// | 0-3    | dCBWSignature          | 0x55 0x53 0x42 0x43 ("USBC")          |
+/// | 4-7    | dCBWTag                | 0xde 0xad 0xbe 0xef                   |
+/// | 8-11   | dCBWDataTransferLength | Data transfer length (little endian)   |
+/// | 12     | bmCBWFlags             | 0x80: Data In (LCD → PC)              |
+/// |        |                        | 0x00: Data Out (PC → LCD)              |
+/// | 13     | bCBWLUN                | 0x00                                   |
+/// | 14     | bCBWCBLength           | 0x10 (CBWCB length)                    |
+/// | 15-30  | CBWCB                  | Command Block (see below)              |
+///
+/// ## Command Status Wrapper (CSW)
+///
+/// The CSW is a 13-byte structure returned by the device after a command:
+///
+/// | Offset | Parameter        | Content                                |
+/// |--------|------------------|----------------------------------------|
+/// | 0-3    | dCSWSignature    | 0x55 0x53 0x42 0x53 ("USBS")          |
+/// | 4-7    | dCSWTag          | 0xde 0xad 0xbe 0xef                   |
+/// | 8-11   | dCSWDataResidue  | 0x00 0x00 0x00 0x00 0x00              |
+/// | 12     | bCSWStatus       | 0x00: Command Passed (good status)     |
+/// |        |                  | 0x01: Command Failed                   |
+/// |        |                  | 0x02: Phase Error                      |
+///
+/// ## Command Block (CBWCB)
+///
+/// There are three main command types used with the AX206LCD:
+///
+/// ### 1. LCD Size Retrieval
+///
+/// | Offset | Content                      |
+/// |--------|------------------------------|
+/// | 0      | 0xcd                         |
+/// | 1-4    | 0x00 0x00 0x00 0x00          |
+/// | 5      | 0x02: get LCD parameters      |
+/// | 6-15   | 0x00 --- 0x00                |
+///
+/// Response (5 bytes):
+/// - Bytes 0-1: Width (little endian, e.g., 0xe0 0x01 = 480)
+/// - Bytes 2-3: Height (little endian, e.g., 0x40 0x01 = 320)
+/// - Byte 4: 0xff
+///
+/// ### 2. Backlight Setting
+///
+/// | Offset | Content                      |
+/// |--------|------------------------------|
+/// | 0      | 0xcd                         |
+/// | 1-4    | 0x00 0x00 0x00 0x00          |
+/// | 5      | 0x06: set LCD backlight       |
+/// | 6      | 0x01                         |
+/// | 7      | 0x01                         |
+/// | 8      | 0x00                         |
+/// | 9      | 0x00-0x07: brightness level   |
+/// | 10-15  | 0x00 --- 0x00                |
+///
+/// ### 3. Image Data Transfer
+///
+/// | Offset | Content                      |
+/// |--------|------------------------------|
+/// | 0      | 0xcd                         |
+/// | 1-4    | 0x00 0x00 0x00 0x00          |
+/// | 5-6    | 0x06 0x12                    |
+/// | 7-8    | x0 (little endian, e.g., 0x00 0x00 = 0) |
+/// | 9-10   | y0 (little endian, e.g., 0x00 0x00 = 0) |
+/// | 11-12  | x1 (little endian, e.g., 0xdf 0x01 = 479) |
+/// | 13-14  | y1 (little endian, e.g., 0x3f 0x01 = 319) |
+/// | 15     | 0x00                         |
+///
+/// After this command, the RGB565 image data for the specified rectangle (x0,y0)-(x1,y1) is sent.
 
 #[derive(Debug, Error)]
 pub enum AX206Error {
@@ -13,17 +103,11 @@ pub enum AX206Error {
     #[error("Device not found")]
     DeviceNotFound,
 
-    #[error("Failed to get device dimensions")]
-    DimensionError,
-
     #[error("Invalid brightness value: {0}")]
     InvalidBrightness(u8),
 
     #[error("SCSI command failed: {0}")]
     ScsiCommandFailed(u8),
-
-    #[error("Image processing error: {0}")]
-    ImageError(String),
 }
 
 pub struct AX206LCD {
@@ -34,11 +118,11 @@ pub struct AX206LCD {
 }
 
 impl AX206LCD {
-    const VID: u16 = 0x1908;
-    const PID: u16 = 0x0102;
-    const BLACK: (u8, u8, u8) = (0, 0, 0);
-
     pub fn new(debug: bool) -> Result<Self, AX206Error> {
+        let config = AppConfig::new().map_err(|_| AX206Error::DeviceNotFound)?;
+        let vid = config.lcd.vid;
+        let pid = config.lcd.pid;
+
         let context = Context::new()?;
 
         // Find the device
@@ -47,7 +131,7 @@ impl AX206LCD {
             .iter()
             .find(|device| {
                 if let Ok(desc) = device.device_descriptor() {
-                    desc.vendor_id() == Self::VID && desc.product_id() == Self::PID
+                    desc.vendor_id() == vid && desc.product_id() == pid
                 } else {
                     false
                 }
@@ -56,7 +140,7 @@ impl AX206LCD {
 
         let mut handle = device.open()?;
 
-        // Check if kernel driver is active
+        // Check if a kernel driver is active
         if handle.kernel_driver_active(0)? {
             // Detach kernel driver
             handle.detach_kernel_driver(0)?;
@@ -105,7 +189,7 @@ impl AX206LCD {
     pub fn clear(&mut self, color: (u8, u8, u8)) -> Result<(), AX206Error> {
         // Convert RGB to RGB565
         let (r, g, b) = color;
-        let rgb565 = [(((r & 0xf8)) | ((g & 0xe0) >> 5)), (((g & 0x1c) << 3) | ((b & 0xf8) >> 3))];
+        let rgb565 = [(r & 0xf8) | ((g & 0xe0) >> 5), ((g & 0x1c) << 3) | ((b & 0xf8) >> 3)];
 
         let out_size = self.width as usize * self.height as usize * 2;
         let mut out_img = vec![0u8; out_size];
@@ -142,16 +226,16 @@ impl AX206LCD {
 
     pub fn draw(&mut self, image: &DynamicImage) -> Result<(), AX206Error> {
         let resized_image = self.resize_image(image);
-        let flipped_image = resized_image; //resized_image.flipv(); // Vertical flip (equivalent to horizontal flip in Python)
+        // No need to vertically flip the image unlike in python's image
 
-        let width = flipped_image.width() as u16;
-        let height = flipped_image.height() as u16;
+        let width = resized_image.width() as u16;
+        let height = resized_image.height() as u16;
 
         let out_size = width as usize * height as usize * 2;
         let mut out_img = vec![0u8; out_size];
 
         // Convert image to RGB565 format
-        for (x, y, pixel) in flipped_image.pixels() {
+        for (x, y, pixel) in resized_image.pixels() {
             let n = ((y * width as u32 + x) * 2) as usize;
 
             // RGBA to RGB565
@@ -159,8 +243,8 @@ impl AX206LCD {
             let g = pixel[1];
             let b = pixel[2];
 
-            out_img[n] = (((r & 0xf8)) | ((g & 0xe0) >> 5));
-            out_img[n + 1] = (((g & 0x1c) << 3) | ((b & 0xf8) >> 3));
+            out_img[n] = (r & 0xf8) | ((g & 0xe0) >> 5);
+            out_img[n + 1] = ((g & 0x1c) << 3) | ((b & 0xf8) >> 3);
         }
 
         let mut cmd = [0xcd, 0x00, 0x00, 0x00, 0x00, 0x06, 0x12, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
@@ -329,7 +413,7 @@ impl Drop for AX206LCD {
             error!("Failed to release interface: {}", e);
         }
 
-        // Try to reattach kernel driver if it was active
+        // Try to reattach the kernel driver if it was active
         if let Err(e) = self.device.attach_kernel_driver(0) {
             error!("Failed to reattach kernel driver: {}", e);
         }
