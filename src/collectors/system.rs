@@ -410,7 +410,7 @@ pub async fn get_hostname() -> String {
     match file::read_to_string("/etc/hostname") {
         Ok(hostname) => {
             debug!("get_hostname took: {} ms", start.elapsed().as_millis());
-            hostname
+            hostname.trim().to_string()
         }
         Err(e) => {
             error!("Failed to get hostname: {}", e);
